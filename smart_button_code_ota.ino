@@ -8,43 +8,49 @@
 
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <esp_system.h>
 #include <esp_arduino_version.h>
 
 #include <SPI.h>
 #include <MFRC522.h>
 
 // =====================================================
-// FIRMWARE VERSION
-// =====================================================
-
-#define FIRMWARE_VERSION "button_v0.2.0"
-
-// =====================================================
 // BOOTSTRAP CONFIG
-// CHANGE THIS BLOCK ONLY FOR EACH FINAL MANUAL UPLOAD
+// CHANGE THIS ONLY FOR FIRST MANUAL USB UPLOAD
 // =====================================================
 
-#define BOOTSTRAP_DEVICE_ID       "BTN-L1N2"
-#define BOOTSTRAP_TARGET_HUB_ID   "HUB-L1"
-#define BOOTSTRAP_LINE_ID         "LINE-001"
-#define BOOTSTRAP_FACTORY_ID      "FACTORY-001"
-#define BOOTSTRAP_HUB_MAC         "F4:65:0B:49:AA:64"
+// #define BOOTSTRAP_DEVICE_NAME "BTN-L1N1"
+// #define BOOTSTRAP_HUB_NAME    "HUB-L1"
+// #define BOOTSTRAP_HUB_MAC     "F4:65:0B:49:AA:64"
 
-// Set this true for the final manual upload if the device may contain old test config.
-// For future universal OTA firmware, set this false.
-#define BOOTSTRAP_FORCE_OVERWRITE true
+#define BOOTSTRAP_DEVICE_NAME "BTN-L1N2"
+#define BOOTSTRAP_HUB_NAME    "HUB-L1"
+#define BOOTSTRAP_HUB_MAC     "F4:65:0B:49:AA:64"
 
-// Direct .bin URL for first OTA tests.
-// Later we can make this a manifest.json URL.
-#define BOOTSTRAP_FIRMWARE_URL    ""
+// #define BOOTSTRAP_DEVICE_NAME "BTN-L2N1"
+// #define BOOTSTRAP_HUB_NAME    "HUB-L2"
+// #define BOOTSTRAP_HUB_MAC     "EC:E3:34:9B:08:F0"
+
+// #define BOOTSTRAP_DEVICE_NAME "BTN-L2N2"
+// #define BOOTSTRAP_HUB_NAME    "HUB-L2"
+// #define BOOTSTRAP_HUB_MAC     "EC:E3:34:9B:08:F0"
+
+
+
+// true  = first manual upload to write identity into NVS
+// false = OTA universal firmware, identity will NOT change
+#define BOOTSTRAP_FORCE_OVERWRITE false
 
 // =====================================================
-// HARDWARE PINS
+// OTA URL
+// =====================================================
+
+#define BUTTON_BIN_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/build/esp32.esp32.esp32/smart_button_code_ota.ino.bin"
+
+// =====================================================
+// PINS
 // =====================================================
 
 #define BUTTON_PIN      2
-
 #define LED_RED_PIN     14
 #define LED_GREEN_PIN   27
 #define LED_BLUE_PIN    26
@@ -56,180 +62,60 @@
 #define RST_PIN         22
 
 // =====================================================
-// PILOT NETWORK CONFIG
+// SETTINGS
 // =====================================================
 
-#define ESPNOW_CHANNEL 1
+#define AP_PASSWORD "12345678"
+#define ESPNOW_CHANNEL 8
 
-#define SETUP_AP_PASSWORD "12345678"
-
-IPAddress setupIP(192, 168, 4, 1);
-IPAddress setupGateway(192, 168, 4, 1);
-IPAddress setupSubnet(255, 255, 255, 0);
-
-// =====================================================
-// BATTERY CALIBRATION
-// 2 x 10k voltage divider => multiplier = 2.0
-// =====================================================
-
-const float VOLTAGE_MULTIPLIER = 2.0;
-const float ADC_REFERENCE_VOLTAGE = 3.3;
-
-const float MAX_BATT_VOLTAGE = 4.2;
-const float MIN_BATT_VOLTAGE = 3.2;
-
-#define OTA_MIN_BATTERY_PERCENT 40
-
-// =====================================================
-// PROTOCOL
-// =====================================================
-
-#define PROTOCOL_VERSION 1
-
-enum MessageType {
-  MSG_HELLO = 1,
-  MSG_ACK = 2,
-  MSG_BADGE_SCAN = 3,
-  MSG_PIECE_DONE = 4,
-  MSG_BATTERY_STATUS = 5,
-  MSG_HEARTBEAT = 6,
-  MSG_ERROR = 7,
-  MSG_CONFIG_UPDATE = 8,
-  MSG_OTA_AVAILABLE = 9,
-  MSG_OTA_START = 10,
-  MSG_OTA_STATUS = 11
-};
-
-typedef struct __attribute__((packed)) {
-  uint8_t protocolVersion;
-  uint8_t messageType;
-  uint8_t batteryPercent;
-  uint8_t reserved1;
-
-  uint32_t bootId;
-  uint32_t sequence;
-  uint32_t uptimeSeconds;
-
-  uint16_t batteryMv;
-  uint16_t eventValue;
-
-  char deviceId[16];
-  char targetHubId[16];
-  char badgeUid[24];
-  char firmwareVersion[16];
-} ButtonToHubPacket;
-
-typedef struct __attribute__((packed)) {
-  uint8_t protocolVersion;
-  uint8_t messageType;
-  uint8_t ackForMessageType;
-  uint8_t statusCode;
-
-  uint32_t ackSequence;
-  uint32_t hubUptimeSeconds;
-
-  char hubId[16];
-  char message[32];
-  char targetVersion[16];
-} HubToButtonAck;
-
-// =====================================================
-// OBJECTS
-// =====================================================
+IPAddress apIP(192, 168, 4, 1);
+IPAddress netMsk(255, 255, 255, 0);
 
 Preferences prefs;
 WebServer server(80);
 DNSServer dnsServer;
-
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 
-// =====================================================
-// CONFIG STRUCT
-// =====================================================
-
-struct ButtonConfig {
-  String deviceId;
-  String factoryId;
-  String lineId;
-  String targetHubId;
-  String targetHubMac;
-  String wifiSsid;
-  String wifiPassword;
-  String firmwareUrl;
-  uint32_t configVersion;
-};
-
-ButtonConfig config;
-
-uint8_t targetHubMacBytes[6];
+const byte DNS_PORT = 53;
 
 // =====================================================
-// STATE
+// STORED CONFIG
 // =====================================================
 
-uint32_t bootId = 0;
-uint32_t sequenceCounter = 0;
-uint16_t pieceCounter = 0;
+String deviceName;
+String hubName;
+String hubMacText;
+String wifiSSID;
+String wifiPassword;
+
+uint8_t hubMac[6];
 
 bool hubConnected = false;
-bool waitingForAck = false;
 
-uint32_t pendingAckSequence = 0;
-uint8_t pendingAckMessageType = 0;
-unsigned long lastAckWaitStartMs = 0;
-
-bool otaRequested = false;
-char requestedOtaVersion[16] = "";
-
-bool setupPortalActive = false;
+unsigned long lastHelloMs = 0;
+unsigned long packetCounter = 0;
+unsigned long lastButtonMs = 0;
 
 // =====================================================
-// TIMERS
+// SIMPLE ESP-NOW PROTOCOL
 // =====================================================
 
-const unsigned long SETUP_HOLD_TIME_MS = 5000;
+#define MSG_HELLO        1
+#define MSG_ACK          2
+#define MSG_BUTTON_PRESS 3
+#define MSG_RFID_SCAN    4
 
-const unsigned long HELLO_RETRY_INTERVAL_MS = 1000;
-const unsigned long ACK_TIMEOUT_MS = 1200;
-
-const unsigned long HEARTBEAT_INTERVAL_MS = 60000;
-const unsigned long BATTERY_STATUS_INTERVAL_MS = 600000;
-
-const unsigned long BUTTON_DEBOUNCE_MS = 60;
-
-unsigned long lastHelloAttemptMs = 0;
-unsigned long lastHeartbeatMs = 0;
-unsigned long lastBatteryStatusMs = 0;
-
-bool lastButtonReading = HIGH;
-bool stableButtonState = HIGH;
-unsigned long lastButtonChangeMs = 0;
+typedef struct __attribute__((packed)) {
+  uint8_t type;
+  char from[16];
+  char to[16];
+  uint32_t counter;
+  char text[32];
+} SimplePacket;
 
 // =====================================================
-// LED MANAGER
+// LED
 // =====================================================
-
-enum LedMode {
-  LED_BOOT_BLUE_BLINK,
-  LED_GREEN_SOLID,
-  LED_GREEN_FLASH,
-  LED_YELLOW_SOLID,
-  LED_YELLOW_BLINK,
-  LED_RED_SOLID,
-  LED_RED_BLINK,
-  LED_PURPLE_SOLID,
-  LED_PURPLE_BLINK,
-  LED_PINK_SOLID,
-  LED_REJECT_RED_BLUE,
-  LED_OTA_FAILED
-};
-
-LedMode currentLedMode = LED_BOOT_BLUE_BLINK;
-
-unsigned long ledLastChangeMs = 0;
-unsigned long ledModeUntilMs = 0;
-bool ledOn = false;
-bool ledAlt = false;
 
 void setLED(bool r, bool g, bool b) {
   digitalWrite(LED_RED_PIN, r ? HIGH : LOW);
@@ -237,113 +123,39 @@ void setLED(bool r, bool g, bool b) {
   digitalWrite(LED_BLUE_PIN, b ? HIGH : LOW);
 }
 
-void applyColor(bool on, bool r, bool g, bool b) {
-  if (!on) {
-    setLED(false, false, false);
-  } else {
-    setLED(r, g, b);
-  }
+void ledRed()    { setLED(true, false, false); }
+void ledGreen()  { setLED(false, true, false); }
+void ledYellow() { setLED(true, true, false); }
+void ledBlue()   { setLED(false, false, true); }
+void ledPurple() { setLED(true, false, true); }
+
+void blinkGreen() {
+  Serial.println("[LED] Blink GREEN");
+  ledGreen();
+  delay(150);
+  setLED(false, false, false);
+  delay(100);
+  ledGreen();
+  delay(150);
+  ledGreen();
 }
 
-void setLedMode(LedMode mode, unsigned long durationMs = 0) {
-  currentLedMode = mode;
-  ledLastChangeMs = 0;
-  ledOn = true;
-  ledAlt = false;
-
-  if (durationMs > 0) {
-    ledModeUntilMs = millis() + durationMs;
-  } else {
-    ledModeUntilMs = 0;
-  }
+void blinkBlue() {
+  Serial.println("[LED] Blink BLUE");
+  ledBlue();
+  delay(200);
+  setLED(false, false, false);
+  delay(100);
+  ledBlue();
+  delay(200);
+  ledGreen();
 }
 
-void updateLed() {
-  unsigned long now = millis();
-
-  if (ledModeUntilMs > 0 && now > ledModeUntilMs) {
-    if (hubConnected) {
-      setLedMode(LED_GREEN_SOLID);
-    } else {
-      setLedMode(LED_YELLOW_BLINK);
-    }
-    return;
-  }
-
-  switch (currentLedMode) {
-    case LED_BOOT_BLUE_BLINK:
-      if (now - ledLastChangeMs >= (ledOn ? 300 : 200)) {
-        ledLastChangeMs = now;
-        ledOn = !ledOn;
-      }
-      applyColor(ledOn, false, false, true);
-      break;
-
-    case LED_GREEN_SOLID:
-      setLED(false, true, false);
-      break;
-
-    case LED_GREEN_FLASH:
-      if (now - ledLastChangeMs >= (ledOn ? 300 : 200)) {
-        ledLastChangeMs = now;
-        ledOn = !ledOn;
-      }
-      applyColor(ledOn, false, true, false);
-      break;
-
-    case LED_YELLOW_SOLID:
-      setLED(true, true, false);
-      break;
-
-    case LED_YELLOW_BLINK:
-      if (now - ledLastChangeMs >= (ledOn ? 300 : 200)) {
-        ledLastChangeMs = now;
-        ledOn = !ledOn;
-      }
-      applyColor(ledOn, true, true, false);
-      break;
-
-    case LED_RED_SOLID:
-      setLED(true, false, false);
-      break;
-
-    case LED_RED_BLINK:
-    case LED_OTA_FAILED:
-      if (now - ledLastChangeMs >= 250) {
-        ledLastChangeMs = now;
-        ledOn = !ledOn;
-      }
-      applyColor(ledOn, true, false, false);
-      break;
-
-    case LED_PURPLE_SOLID:
-      setLED(true, false, true);
-      break;
-
-    case LED_PURPLE_BLINK:
-      if (now - ledLastChangeMs >= 250) {
-        ledLastChangeMs = now;
-        ledOn = !ledOn;
-      }
-      applyColor(ledOn, true, false, true);
-      break;
-
-    case LED_PINK_SOLID:
-      setLED(true, false, true);
-      break;
-
-    case LED_REJECT_RED_BLUE:
-      if (now - ledLastChangeMs >= 200) {
-        ledLastChangeMs = now;
-        ledAlt = !ledAlt;
-      }
-      if (ledAlt) {
-        setLED(true, false, false);
-      } else {
-        setLED(false, false, true);
-      }
-      break;
-  }
+void blinkPurpleDuringOTA() {
+  ledPurple();
+  delay(150);
+  setLED(false, false, false);
+  delay(150);
 }
 
 // =====================================================
@@ -366,11 +178,11 @@ String macToString(const uint8_t *mac) {
   return String(buffer);
 }
 
-bool parseMacAddress(const String &macStr, uint8_t *mac) {
+bool parseMac(String macText, uint8_t *mac) {
   int values[6];
 
   if (sscanf(
-        macStr.c_str(),
+        macText.c_str(),
         "%x:%x:%x:%x:%x:%x",
         &values[0], &values[1], &values[2],
         &values[3], &values[4], &values[5]
@@ -386,637 +198,105 @@ bool parseMacAddress(const String &macStr, uint8_t *mac) {
   return true;
 }
 
-String htmlEscape(String value) {
-  value.replace("&", "&amp;");
-  value.replace("<", "&lt;");
-  value.replace(">", "&gt;");
-  value.replace("\"", "&quot;");
-  value.replace("'", "&#39;");
-  return value;
+// =====================================================
+// NVS CONFIG
+// =====================================================
+
+void saveBootstrapIdentityIfNeeded() {
+  prefs.begin("btn_cfg", false);
+
+  bool initialized = prefs.getBool("initialized", false);
+
+  if (!initialized || BOOTSTRAP_FORCE_OVERWRITE) {
+    Serial.println("[NVS] Writing bootstrap identity.");
+
+    prefs.putString("device", BOOTSTRAP_DEVICE_NAME);
+    prefs.putString("hub", BOOTSTRAP_HUB_NAME);
+    prefs.putString("hubmac", BOOTSTRAP_HUB_MAC);
+
+    if (!initialized) {
+      prefs.putString("ssid", "");
+      prefs.putString("pass", "");
+    }
+
+    prefs.putBool("initialized", true);
+  }
+
+  prefs.end();
 }
 
-const char* messageTypeToText(uint8_t type) {
-  switch (type) {
-    case MSG_HELLO: return "HELLO";
-    case MSG_ACK: return "ACK";
-    case MSG_BADGE_SCAN: return "BADGE_SCAN";
-    case MSG_PIECE_DONE: return "PIECE_DONE";
-    case MSG_BATTERY_STATUS: return "BATTERY_STATUS";
-    case MSG_HEARTBEAT: return "HEARTBEAT";
-    case MSG_ERROR: return "ERROR";
-    case MSG_CONFIG_UPDATE: return "CONFIG_UPDATE";
-    case MSG_OTA_AVAILABLE: return "OTA_AVAILABLE";
-    case MSG_OTA_START: return "OTA_START";
-    case MSG_OTA_STATUS: return "OTA_STATUS";
-    default: return "UNKNOWN";
+void loadConfig() {
+  saveBootstrapIdentityIfNeeded();
+
+  prefs.begin("btn_cfg", true);
+
+  deviceName = prefs.getString("device", BOOTSTRAP_DEVICE_NAME);
+  hubName = prefs.getString("hub", BOOTSTRAP_HUB_NAME);
+  hubMacText = prefs.getString("hubmac", BOOTSTRAP_HUB_MAC);
+  wifiSSID = prefs.getString("ssid", "");
+  wifiPassword = prefs.getString("pass", "");
+
+  prefs.end();
+
+  hubMacText.toUpperCase();
+
+  Serial.println();
+  Serial.println("========== LOADED BUTTON CONFIG ==========");
+  Serial.print("Device Name: "); Serial.println(deviceName);
+  Serial.print("Hub Name: "); Serial.println(hubName);
+  Serial.print("Hub MAC: "); Serial.println(hubMacText);
+  Serial.print("Wi-Fi SSID: "); Serial.println(wifiSSID);
+  Serial.println("==========================================");
+
+  if (!parseMac(hubMacText, hubMac)) {
+    Serial.println("[NVS] ERROR: Invalid Hub MAC.");
   }
 }
 
-// =====================================================
-// BATTERY
-// =====================================================
+void saveConfig(String newDevice, String newHub, String newHubMac, String ssid, String pass) {
+  newHubMac.toUpperCase();
 
-uint16_t readBatteryMv() {
-  long total = 0;
-  const int samples = 20;
+  prefs.begin("btn_cfg", false);
 
-  for (int i = 0; i < samples; i++) {
-    total += analogRead(BATT_PIN);
-    delayMicroseconds(500);
-  }
-
-  float avgAdc = total / (float)samples;
-  float pinVoltage = (avgAdc / 4095.0) * ADC_REFERENCE_VOLTAGE;
-  float batteryVoltage = pinVoltage * VOLTAGE_MULTIPLIER;
-
-  return (uint16_t)(batteryVoltage * 1000.0);
-}
-
-uint8_t batteryMvToPercent(uint16_t mv) {
-  float voltage = mv / 1000.0;
-
-  if (voltage >= MAX_BATT_VOLTAGE) return 100;
-  if (voltage <= MIN_BATT_VOLTAGE) return 0;
-
-  float percent = ((voltage - MIN_BATT_VOLTAGE) / (MAX_BATT_VOLTAGE - MIN_BATT_VOLTAGE)) * 100.0;
-
-  if (percent < 0) percent = 0;
-  if (percent > 100) percent = 100;
-
-  return (uint8_t)percent;
-}
-
-bool isUsbPlugged() {
-  return digitalRead(USB_PIN) == HIGH;
-}
-
-// =====================================================
-// CONFIG MANAGER
-// =====================================================
-
-void saveConfigToNVS() {
-  prefs.begin("btn_config", false);
-
-  prefs.putString("device_id", config.deviceId);
-  prefs.putString("factory_id", config.factoryId);
-  prefs.putString("line_id", config.lineId);
-  prefs.putString("hub_id", config.targetHubId);
-  prefs.putString("hub_mac", config.targetHubMac);
-  prefs.putString("wifi_ssid", config.wifiSsid);
-  prefs.putString("wifi_pass", config.wifiPassword);
-  prefs.putString("fw_url", config.firmwareUrl);
-  prefs.putUInt("cfg_ver", config.configVersion);
+  prefs.putString("device", newDevice);
+  prefs.putString("hub", newHub);
+  prefs.putString("hubmac", newHubMac);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
   prefs.putBool("initialized", true);
 
   prefs.end();
 
-  Serial.println("[CONFIG] Saved to NVS.");
-}
+  Serial.println("[NVS] Config saved.");
 
-void saveBootstrapConfigToNVS() {
-  config.deviceId = BOOTSTRAP_DEVICE_ID;
-  config.factoryId = BOOTSTRAP_FACTORY_ID;
-  config.lineId = BOOTSTRAP_LINE_ID;
-  config.targetHubId = BOOTSTRAP_TARGET_HUB_ID;
-  config.targetHubMac = BOOTSTRAP_HUB_MAC;
-  config.wifiSsid = "";
-  config.wifiPassword = "";
-  config.firmwareUrl = BOOTSTRAP_FIRMWARE_URL;
-  config.configVersion = 1;
-
-  saveConfigToNVS();
-}
-
-void loadConfigFromNVS() {
-  prefs.begin("btn_config", false);
-
-  bool initialized = prefs.getBool("initialized", false);
-
-  prefs.end();
-
-  if (!initialized || BOOTSTRAP_FORCE_OVERWRITE) {
-    Serial.println("[CONFIG] No config found or bootstrap overwrite enabled.");
-    Serial.println("[CONFIG] Saving bootstrap config.");
-    saveBootstrapConfigToNVS();
-  }
-
-  prefs.begin("btn_config", true);
-
-  config.deviceId = prefs.getString("device_id", BOOTSTRAP_DEVICE_ID);
-  config.factoryId = prefs.getString("factory_id", BOOTSTRAP_FACTORY_ID);
-  config.lineId = prefs.getString("line_id", BOOTSTRAP_LINE_ID);
-  config.targetHubId = prefs.getString("hub_id", BOOTSTRAP_TARGET_HUB_ID);
-  config.targetHubMac = prefs.getString("hub_mac", BOOTSTRAP_HUB_MAC);
-  config.wifiSsid = prefs.getString("wifi_ssid", "");
-  config.wifiPassword = prefs.getString("wifi_pass", "");
-  config.firmwareUrl = prefs.getString("fw_url", BOOTSTRAP_FIRMWARE_URL);
-  config.configVersion = prefs.getUInt("cfg_ver", 1);
-
-  prefs.end();
-
-  Serial.println();
-  Serial.println("========== LOADED CONFIG ==========");
-  Serial.print("Device ID: "); Serial.println(config.deviceId);
-  Serial.print("Factory ID: "); Serial.println(config.factoryId);
-  Serial.print("Line ID: "); Serial.println(config.lineId);
-  Serial.print("Target Hub ID: "); Serial.println(config.targetHubId);
-  Serial.print("Target Hub MAC: "); Serial.println(config.targetHubMac);
-  Serial.print("Wi-Fi SSID: "); Serial.println(config.wifiSsid);
-  Serial.print("Firmware URL: "); Serial.println(config.firmwareUrl);
-  Serial.print("Config Version: "); Serial.println(config.configVersion);
-  Serial.println("===================================");
-}
-
-// =====================================================
-// CONFIG PORTAL
-// =====================================================
-
-String buildConfigPage() {
-  String html = "";
-
-  html += "<!DOCTYPE html><html><head>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>ESS Smart Button Setup</title>";
-
-  html += "<style>";
-  html += "body{font-family:Arial;background:#f4f4f4;margin:0;padding:20px;}";
-  html += ".card{background:white;max-width:520px;margin:auto;padding:22px;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.16);}";
-  html += "h2{text-align:center;margin-top:0;}";
-  html += "label{font-weight:bold;margin-top:12px;display:block;}";
-  html += "input{width:100%;padding:12px;margin-top:6px;box-sizing:border-box;border:1px solid #ccc;border-radius:7px;}";
-  html += "button{width:100%;padding:14px;margin-top:20px;background:#111;color:white;border:none;border-radius:7px;font-size:16px;}";
-  html += ".info{background:#eee;padding:12px;border-radius:8px;margin-bottom:16px;}";
-  html += ".small{font-size:13px;color:#666;}";
-  html += "</style>";
-
-  html += "</head><body><div class='card'>";
-
-  html += "<h2>ESS Smart Button Setup</h2>";
-
-  html += "<div class='info'>";
-  html += "<b>Firmware:</b> ";
-  html += FIRMWARE_VERSION;
-  html += "<br><b>Setup IP:</b> 192.168.4.1";
-  html += "<br><b>Current MAC:</b> ";
-  html += WiFi.macAddress();
-  html += "</div>";
-
-  html += "<form action='/save' method='POST'>";
-
-  html += "<label>Device ID</label>";
-  html += "<input name='device_id' value='" + htmlEscape(config.deviceId) + "'>";
-
-  html += "<label>Factory ID</label>";
-  html += "<input name='factory_id' value='" + htmlEscape(config.factoryId) + "'>";
-
-  html += "<label>Line ID</label>";
-  html += "<input name='line_id' value='" + htmlEscape(config.lineId) + "'>";
-
-  html += "<label>Target Hub ID</label>";
-  html += "<input name='target_hub_id' value='" + htmlEscape(config.targetHubId) + "'>";
-
-  html += "<label>Target Hub MAC</label>";
-  html += "<input name='target_hub_mac' placeholder='F4:65:0B:49:AA:64' value='" + htmlEscape(config.targetHubMac) + "'>";
-
-  html += "<label>Factory Wi-Fi SSID</label>";
-  html += "<input name='wifi_ssid' value='" + htmlEscape(config.wifiSsid) + "'>";
-
-  html += "<label>Factory Wi-Fi Password</label>";
-  html += "<input type='password' name='wifi_password' value='" + htmlEscape(config.wifiPassword) + "'>";
-
-  html += "<label>Firmware Manifest / Direct .bin URL</label>";
-  html += "<input name='firmware_url' placeholder='https://.../firmware.bin' value='" + htmlEscape(config.firmwareUrl) + "'>";
-  html += "<p class='small'>For v0.2.0 this field is treated as a direct firmware .bin URL.</p>";
-
-  html += "<button type='submit'>Save & Restart</button>";
-  html += "</form>";
-
-  html += "</div></body></html>";
-
-  return html;
-}
-
-void handleConfigRoot() {
-  server.send(200, "text/html", buildConfigPage());
-}
-
-void handleConfigSave() {
-  config.deviceId = server.arg("device_id");
-  config.factoryId = server.arg("factory_id");
-  config.lineId = server.arg("line_id");
-  config.targetHubId = server.arg("target_hub_id");
-  config.targetHubMac = server.arg("target_hub_mac");
-  config.targetHubMac.toUpperCase();
-
-  config.wifiSsid = server.arg("wifi_ssid");
-  config.wifiPassword = server.arg("wifi_password");
-  config.firmwareUrl = server.arg("firmware_url");
-  config.configVersion++;
-
-  saveConfigToNVS();
-
-  String html = "";
-  html += "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body>";
-  html += "<h2>Configuration Saved</h2>";
-  html += "<p>Device will restart now.</p>";
-  html += "</body></html>";
-
-  server.send(200, "text/html", html);
-
-  delay(800);
-  ESP.restart();
-}
-
-void handleCaptivePortal() {
-  server.sendHeader("Location", "http://192.168.4.1/", true);
-  server.send(302, "text/plain", "");
-}
-
-bool shouldEnterSetupPortal() {
-  if (digitalRead(BUTTON_PIN) == HIGH) {
-    return false;
-  }
-
-  Serial.println("[SETUP] Button held during boot. Hold for 5 seconds to enter setup.");
-
-  unsigned long start = millis();
-
-  while (digitalRead(BUTTON_PIN) == LOW) {
-    updateLed();
-
-    if (millis() - start >= SETUP_HOLD_TIME_MS) {
-      Serial.println("[SETUP] Entering config portal.");
-      return true;
-    }
-
-    delay(20);
-  }
-
-  Serial.println("[SETUP] Button released before 5 seconds. Continue normal boot.");
-  return false;
-}
-
-void startConfigPortal() {
-  setupPortalActive = true;
-
-  setLedMode(LED_PURPLE_SOLID);
-
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(setupIP, setupGateway, setupSubnet);
-
-  // String apSsid = "ESS-" + config.deviceId + "-SETUP";
-  String apSsid = config.deviceId;
-
-  WiFi.softAP(apSsid.c_str(), SETUP_AP_PASSWORD);
-
-  dnsServer.start(53, "*", setupIP);
-
-  server.on("/", HTTP_GET, handleConfigRoot);
-  server.on("/save", HTTP_POST, handleConfigSave);
-
-  server.on("/generate_204", HTTP_GET, handleConfigRoot);
-  server.on("/hotspot-detect.html", HTTP_GET, handleConfigRoot);
-  server.on("/fwlink", HTTP_GET, handleConfigRoot);
-
-  server.onNotFound(handleCaptivePortal);
-
-  server.begin();
-
-  Serial.println();
-  Serial.println("========== CONFIG PORTAL ACTIVE ==========");
-  Serial.print("SSID: "); Serial.println(apSsid);
-  Serial.print("Password: "); Serial.println(SETUP_AP_PASSWORD);
-  Serial.println("URL: http://192.168.4.1");
-  Serial.println("==========================================");
-
-  while (true) {
-    dnsServer.processNextRequest();
-    server.handleClient();
-    updateLed();
-    delay(2);
-  }
-}
-
-// =====================================================
-// ESP-NOW SEND
-// =====================================================
-
-bool sendButtonPacket(uint8_t messageType, const char *badgeUid, uint16_t eventValue) {
-  if (waitingForAck && messageType != MSG_HELLO) {
-    Serial.println("[BTN] Busy waiting for ACK. Packet skipped.");
-    return false;
-  }
-
-  ButtonToHubPacket packet;
-
-  uint16_t batteryMv = readBatteryMv();
-  uint8_t batteryPercent = batteryMvToPercent(batteryMv);
-
-  packet.protocolVersion = PROTOCOL_VERSION;
-  packet.messageType = messageType;
-  packet.batteryPercent = batteryPercent;
-  packet.reserved1 = 0;
-
-  packet.bootId = bootId;
-  packet.sequence = ++sequenceCounter;
-  packet.uptimeSeconds = millis() / 1000;
-
-  packet.batteryMv = batteryMv;
-  packet.eventValue = eventValue;
-
-  safeCopy(packet.deviceId, config.deviceId.c_str(), sizeof(packet.deviceId));
-  safeCopy(packet.targetHubId, config.targetHubId.c_str(), sizeof(packet.targetHubId));
-
-  if (badgeUid != nullptr) {
-    safeCopy(packet.badgeUid, badgeUid, sizeof(packet.badgeUid));
-  } else {
-    safeCopy(packet.badgeUid, "", sizeof(packet.badgeUid));
-  }
-
-  safeCopy(packet.firmwareVersion, FIRMWARE_VERSION, sizeof(packet.firmwareVersion));
-
-  Serial.println();
-  Serial.println("========== SEND PACKET ==========");
-  Serial.print("Type: "); Serial.println(messageTypeToText(messageType));
-  Serial.print("Device: "); Serial.println(packet.deviceId);
-  Serial.print("Hub: "); Serial.println(packet.targetHubId);
-  Serial.print("Hub MAC: "); Serial.println(macToString(targetHubMacBytes));
-  Serial.print("Sequence: "); Serial.println(packet.sequence);
-  Serial.print("Battery: "); Serial.print(packet.batteryMv); Serial.print("mV / ");
-  Serial.print(packet.batteryPercent); Serial.println("%");
-  Serial.print("Firmware: "); Serial.println(packet.firmwareVersion);
-  if (messageType == MSG_BADGE_SCAN) {
-    Serial.print("Badge UID: "); Serial.println(packet.badgeUid);
-  }
-  Serial.println("===============================");
-
-  waitingForAck = true;
-  pendingAckSequence = packet.sequence;
-  pendingAckMessageType = messageType;
-  lastAckWaitStartMs = millis();
-
-  esp_err_t result = esp_now_send(targetHubMacBytes, (uint8_t *)&packet, sizeof(packet));
-
-  if (result == ESP_OK) {
-    Serial.println("[BTN] ESP-NOW send request OK.");
-    return true;
-  }
-
-  Serial.print("[BTN] ESP-NOW send request failed. Error: ");
-  Serial.println(result);
-
-  waitingForAck = false;
-  setLedMode(LED_YELLOW_BLINK, 2000);
-  return false;
-}
-
-// =====================================================
-// ESP-NOW CALLBACKS
-// =====================================================
-
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
-  Serial.print("[BTN] Send callback: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW-LEVEL SUCCESS" : "LOW-LEVEL FAILED");
-
-  if (status != ESP_NOW_SEND_SUCCESS) {
-    setLedMode(LED_YELLOW_BLINK, 2000);
-  }
-}
-#else
-void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
-  Serial.print("[BTN] Send callback to ");
-  Serial.print(macToString(macAddr));
-  Serial.print(": ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW-LEVEL SUCCESS" : "LOW-LEVEL FAILED");
-
-  if (status != ESP_NOW_SEND_SUCCESS) {
-    setLedMode(LED_YELLOW_BLINK, 2000);
-  }
-}
-#endif
-
-void handleHubPacket(const uint8_t *senderMac, const uint8_t *incomingData, int len) {
-  if (len != sizeof(HubToButtonAck)) {
-    Serial.print("[BTN] Invalid incoming packet size: ");
-    Serial.println(len);
-    return;
-  }
-
-  HubToButtonAck packet;
-  memcpy(&packet, incomingData, sizeof(packet));
-
-  Serial.println();
-  Serial.println("========== HUB PACKET ==========");
-  Serial.print("From MAC: "); Serial.println(macToString(senderMac));
-  Serial.print("Message Type: "); Serial.println(messageTypeToText(packet.messageType));
-  Serial.print("ACK For: "); Serial.println(messageTypeToText(packet.ackForMessageType));
-  Serial.print("ACK Sequence: "); Serial.println(packet.ackSequence);
-  Serial.print("Hub ID: "); Serial.println(packet.hubId);
-  Serial.print("Status: "); Serial.println(packet.statusCode);
-  Serial.print("Message: "); Serial.println(packet.message);
-  Serial.print("Target Version: "); Serial.println(packet.targetVersion);
-  Serial.println("===============================");
-
-  bool validProtocol = packet.protocolVersion == PROTOCOL_VERSION;
-  bool validHub = strcmp(packet.hubId, config.targetHubId.c_str()) == 0;
-
-  if (!validProtocol || !validHub) {
-    Serial.println("[BTN] Packet ignored: invalid protocol or wrong hub.");
-    return;
-  }
-
-  if (packet.messageType == MSG_ACK) {
-    bool validSequence = packet.ackSequence == pendingAckSequence;
-    bool validAckType = packet.ackForMessageType == pendingAckMessageType;
-
-    if (waitingForAck && validSequence && validAckType && packet.statusCode == 0) {
-      Serial.println("[BTN] Valid ACK received.");
-
-      waitingForAck = false;
-      hubConnected = true;
-
-      setLedMode(LED_GREEN_FLASH, 2000);
-    } else {
-      Serial.println("[BTN] ACK validation failed or status not OK.");
-
-      waitingForAck = false;
-
-      if (packet.statusCode == 2) {
-        setLedMode(LED_REJECT_RED_BLUE, 2000);
-      } else {
-        setLedMode(LED_YELLOW_BLINK, 2000);
-      }
-    }
-
-    return;
-  }
-
-  if (packet.messageType == MSG_OTA_START) {
-    Serial.println("[BTN] OTA START command received from Hub.");
-
-    safeCopy(requestedOtaVersion, packet.targetVersion, sizeof(requestedOtaVersion));
-    otaRequested = true;
-
-    return;
-  }
-
-  Serial.println("[BTN] Hub packet ignored: unsupported message type.");
-}
-
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onDataRecv(const esp_now_recv_info_t *recvInfo, const uint8_t *incomingData, int len) {
-  handleHubPacket(recvInfo->src_addr, incomingData, len);
-}
-#else
-void onDataRecv(const uint8_t *macAddr, const uint8_t *incomingData, int len) {
-  handleHubPacket(macAddr, incomingData, len);
-}
-#endif
-
-// =====================================================
-// ESP-NOW SETUP
-// =====================================================
-
-bool setupEspNow() {
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  WiFi.setSleep(false);
-
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
-
-  Serial.print("[BTN] STA MAC: ");
-  Serial.println(WiFi.macAddress());
-
-  if (!parseMacAddress(config.targetHubMac, targetHubMacBytes)) {
-    Serial.println("[BTN] ERROR: Invalid target Hub MAC.");
-    setLedMode(LED_RED_SOLID);
-    return false;
-  }
-
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("[BTN] ERROR: ESP-NOW init failed.");
-    setLedMode(LED_RED_BLINK);
-    return false;
-  }
-
-  esp_now_register_send_cb(onDataSent);
-  esp_now_register_recv_cb(onDataRecv);
-
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, targetHubMacBytes, 6);
-  peerInfo.channel = ESPNOW_CHANNEL;
-  peerInfo.encrypt = false;
-
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("[BTN] ERROR: Failed to add Hub peer.");
-    setLedMode(LED_RED_BLINK);
-    return false;
-  }
-
-  Serial.println("[BTN] ESP-NOW ready.");
-  return true;
-}
-
-// =====================================================
-// RFID
-// =====================================================
-
-void setupRFID() {
-  SPI.begin();
-  mfrc522.PCD_Init();
-
-  Serial.println("[BTN] RFID initialized.");
-}
-
-void checkRFID() {
-  if (!hubConnected) return;
-  if (waitingForAck) return;
-
-  if (!mfrc522.PICC_IsNewCardPresent()) return;
-  if (!mfrc522.PICC_ReadCardSerial()) return;
-
-  char uidString[24];
-  uidString[0] = '\0';
-
-  for (byte i = 0; i < mfrc522.uid.size; i++) {
-    char byteText[4];
-    snprintf(byteText, sizeof(byteText), "%02X", mfrc522.uid.uidByte[i]);
-    strncat(uidString, byteText, sizeof(uidString) - strlen(uidString) - 1);
-  }
-
-  Serial.print("[BTN] RFID badge scanned: ");
-  Serial.println(uidString);
-
-  sendButtonPacket(MSG_BADGE_SCAN, uidString, 0);
-
-  mfrc522.PICC_HaltA();
-  mfrc522.PCD_StopCrypto1();
-}
-
-// =====================================================
-// BUTTON
-// =====================================================
-
-void checkButtonPress() {
-  if (!hubConnected) return;
-  if (waitingForAck) return;
-
-  bool reading = digitalRead(BUTTON_PIN);
-
-  if (reading != lastButtonReading) {
-    lastButtonChangeMs = millis();
-    lastButtonReading = reading;
-  }
-
-  if ((millis() - lastButtonChangeMs) > BUTTON_DEBOUNCE_MS) {
-    if (reading != stableButtonState) {
-      stableButtonState = reading;
-
-      if (stableButtonState == LOW) {
-        pieceCounter++;
-
-        Serial.println();
-        Serial.print("[BTN] Piece done. Counter: ");
-        Serial.println(pieceCounter);
-
-        sendButtonPacket(MSG_PIECE_DONE, nullptr, pieceCounter);
-      }
-    }
-  }
+  loadConfig();
 }
 
 // =====================================================
 // OTA
 // =====================================================
 
-bool connectToWiFiForOTA() {
-  if (config.wifiSsid.length() == 0) {
-    Serial.println("[OTA] Wi-Fi SSID is empty.");
+bool connectWiFiForOTA() {
+  if (wifiSSID.length() == 0) {
+    Serial.println("[OTA] No Wi-Fi SSID saved.");
     return false;
   }
 
-  Serial.println("[OTA] Switching from ESP-NOW to Wi-Fi.");
-
-  esp_now_deinit();
+  Serial.println("[OTA] Connecting to Wi-Fi...");
+  Serial.print("[OTA] SSID: ");
+  Serial.println(wifiSSID);
 
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(200);
-
-  WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
-
-  Serial.print("[OTA] Connecting to Wi-Fi: ");
-  Serial.println(config.wifiSsid);
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
 
   unsigned long start = millis();
 
   while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    setLedMode(LED_YELLOW_BLINK);
-    updateLed();
-    delay(20);
+    blinkPurpleDuringOTA();
+    Serial.print(".");
   }
+
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("[OTA] Wi-Fi connected.");
@@ -1025,46 +305,36 @@ bool connectToWiFiForOTA() {
     return true;
   }
 
-  Serial.println("[OTA] Wi-Fi connection failed.");
+  Serial.println("[OTA] Wi-Fi failed.");
   return false;
 }
 
-bool performDirectBinOTA(const String &url) {
-  if (url.length() == 0) {
-    Serial.println("[OTA] Firmware URL is empty.");
+bool performOTA() {
+  Serial.println();
+  Serial.println("========== BUTTON OTA START ==========");
+  Serial.print("[OTA] URL: ");
+  Serial.println(BUTTON_BIN_URL);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  if (!http.begin(client, BUTTON_BIN_URL)) {
+    Serial.println("[OTA] HTTP begin failed.");
     return false;
   }
 
-  Serial.print("[OTA] Firmware URL: ");
-  Serial.println(url);
-
-  HTTPClient http;
-  WiFiClient normalClient;
-  WiFiClientSecure secureClient;
-
-  bool isHttps = url.startsWith("https://");
-
-  if (isHttps) {
-    secureClient.setInsecure();
-    if (!http.begin(secureClient, url)) {
-      Serial.println("[OTA] HTTPS begin failed.");
-      return false;
-    }
-  } else {
-    if (!http.begin(normalClient, url)) {
-      Serial.println("[OTA] HTTP begin failed.");
-      return false;
-    }
-  }
-
-  http.setTimeout(20000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(30000);
+  http.addHeader("Cache-Control", "no-cache");
 
   int httpCode = http.GET();
 
+  Serial.print("[OTA] HTTP code: ");
+  Serial.println(httpCode);
+
   if (httpCode != HTTP_CODE_OK) {
-    Serial.print("[OTA] HTTP GET failed. Code: ");
-    Serial.println(httpCode);
+    Serial.println("[OTA] Download failed.");
     http.end();
     return false;
   }
@@ -1074,22 +344,12 @@ bool performDirectBinOTA(const String &url) {
   Serial.print("[OTA] Content length: ");
   Serial.println(contentLength);
 
-  bool canBegin = false;
-
-  if (contentLength > 0) {
-    canBegin = Update.begin(contentLength);
-  } else {
-    canBegin = Update.begin(UPDATE_SIZE_UNKNOWN);
-  }
-
-  if (!canBegin) {
+  if (!Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN)) {
     Serial.println("[OTA] Update.begin failed.");
     Update.printError(Serial);
     http.end();
     return false;
   }
-
-  setLedMode(LED_PURPLE_BLINK);
 
   WiFiClient *stream = http.getStreamPtr();
 
@@ -1097,13 +357,6 @@ bool performDirectBinOTA(const String &url) {
 
   Serial.print("[OTA] Written bytes: ");
   Serial.println(written);
-
-  if (contentLength > 0 && written != (size_t)contentLength) {
-    Serial.println("[OTA] Written size mismatch.");
-    Update.printError(Serial);
-    http.end();
-    return false;
-  }
 
   if (!Update.end()) {
     Serial.println("[OTA] Update.end failed.");
@@ -1120,141 +373,356 @@ bool performDirectBinOTA(const String &url) {
 
   http.end();
 
-  Serial.println("[OTA] Update successful. Rebooting.");
-  setLedMode(LED_PURPLE_SOLID);
-  updateLed();
-
+  Serial.println("[OTA] SUCCESS. Restarting.");
+  ledPurple();
   delay(1000);
   ESP.restart();
 
   return true;
 }
 
-void handleOtaRequest() {
-  if (!otaRequested) return;
+void startOTAFromPortal() {
+  Serial.println("[PORTAL] OTA requested.");
 
-  otaRequested = false;
+  server.send(200, "text/html", "<h2>OTA started</h2><p>Device is updating from GitHub.</p>");
+
+  delay(1000);
+
+  esp_now_deinit();
+
+  if (!connectWiFiForOTA()) {
+    Serial.println("[OTA] Wi-Fi failed. Restarting.");
+    delay(3000);
+    ESP.restart();
+  }
+
+  if (!performOTA()) {
+    Serial.println("[OTA] Update failed. Restarting.");
+    delay(3000);
+    ESP.restart();
+  }
+}
+
+// =====================================================
+// WEB PORTAL
+// =====================================================
+
+String htmlPage() {
+  String html = "";
+
+  html += "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Button OTA Setup</title>";
+  html += "<style>";
+  html += "body{font-family:Arial;background:#f4f4f4;padding:20px;}";
+  html += ".card{background:white;padding:20px;border-radius:12px;max-width:450px;margin:auto;box-shadow:0 2px 8px rgba(0,0,0,.15);}";
+  html += "input{width:100%;padding:12px;margin:8px 0;box-sizing:border-box;}";
+  html += "button{width:100%;padding:14px;margin-top:10px;background:#111;color:white;border:0;border-radius:6px;font-size:16px;}";
+  html += ".info{background:#eee;padding:10px;border-radius:6px;margin-bottom:10px;font-size:14px;}";
+  html += "</style></head><body><div class='card'>";
+
+  html += "<h2>Smart Button OTA Setup</h2>";
+
+  html += "<div class='info'>";
+  html += "<b>Device:</b> " + deviceName;
+  html += "<br><b>Hub:</b> " + hubName;
+  html += "<br><b>Hub MAC:</b> " + hubMacText;
+  html += "<br><b>Setup:</b> http://192.168.4.1";
+  html += "<br><b>OTA URL:</b><br>";
+  html += BUTTON_BIN_URL;
+  html += "</div>";
+
+  html += "<form action='/save' method='POST'>";
+
+  html += "<label>Device Name</label>";
+  html += "<input name='device' value='" + deviceName + "'>";
+
+  html += "<label>Hub Name</label>";
+  html += "<input name='hub' value='" + hubName + "'>";
+
+  html += "<label>Hub MAC</label>";
+  html += "<input name='hubmac' value='" + hubMacText + "'>";
+
+  html += "<label>Wi-Fi SSID</label>";
+  html += "<input name='ssid' value='" + wifiSSID + "'>";
+
+  html += "<label>Wi-Fi Password</label>";
+  html += "<input name='pass' type='password' value='" + wifiPassword + "'>";
+
+  html += "<button type='submit'>Save Config</button>";
+  html += "</form>";
+
+  html += "<form action='/update' method='POST'>";
+  html += "<button type='submit'>Update From GitHub Now</button>";
+  html += "</form>";
+
+  html += "</div></body></html>";
+
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", htmlPage());
+}
+
+void handleSave() {
+  saveConfig(
+    server.arg("device"),
+    server.arg("hub"),
+    server.arg("hubmac"),
+    server.arg("ssid"),
+    server.arg("pass")
+  );
+
+  server.send(200, "text/html", "<h2>Saved</h2><p>Config saved.</p><p>If you changed identity, restart device.</p><a href='/'>Back</a>");
+}
+
+void handleCaptive() {
+  server.sendHeader("Location", "http://192.168.4.1/", true);
+  server.send(302, "text/plain", "");
+}
+
+void startPortal() {
+  Serial.println();
+  Serial.println("========== BUTTON PORTAL START ==========");
+  Serial.print("[PORTAL] SSID: ");
+  Serial.println(deviceName);
+  Serial.print("[PORTAL] Password: ");
+  Serial.println(AP_PASSWORD);
+  Serial.println("[PORTAL] URL: http://192.168.4.1");
+  Serial.println("=========================================");
+
+  ledYellow();
+
+  esp_now_deinit();
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, netMsk);
+  WiFi.softAP(deviceName.c_str(), AP_PASSWORD, ESPNOW_CHANNEL);
+
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/update", HTTP_POST, startOTAFromPortal);
+
+  server.on("/generate_204", HTTP_GET, handleRoot);
+  server.on("/hotspot-detect.html", HTTP_GET, handleRoot);
+  server.on("/fwlink", HTTP_GET, handleRoot);
+
+  server.onNotFound(handleCaptive);
+
+  server.begin();
+
+  while (true) {
+    dnsServer.processNextRequest();
+    server.handleClient();
+    delay(2);
+  }
+}
+
+// =====================================================
+// ESP-NOW
+// =====================================================
+
+void sendPacket(uint8_t type, const char *text) {
+  SimplePacket packet;
+
+  packet.type = type;
+  safeCopy(packet.from, deviceName.c_str(), sizeof(packet.from));
+  safeCopy(packet.to, hubName.c_str(), sizeof(packet.to));
+  packet.counter = ++packetCounter;
+  safeCopy(packet.text, text, sizeof(packet.text));
 
   Serial.println();
-  Serial.println("========== OTA REQUEST ==========");
+  Serial.println("========== BUTTON SEND ESP-NOW ==========");
+  Serial.print("Type: "); Serial.println(type);
+  Serial.print("From: "); Serial.println(packet.from);
+  Serial.print("To: "); Serial.println(packet.to);
+  Serial.print("Counter: "); Serial.println(packet.counter);
+  Serial.print("Text: "); Serial.println(packet.text);
+  Serial.print("Hub MAC: "); Serial.println(macToString(hubMac));
+  Serial.println("=========================================");
 
-  uint16_t batteryMv = readBatteryMv();
-  uint8_t batteryPercent = batteryMvToPercent(batteryMv);
-  bool usb = isUsbPlugged();
+  esp_err_t result = esp_now_send(hubMac, (uint8_t *)&packet, sizeof(packet));
 
-  Serial.print("[OTA] Battery: ");
-  Serial.print(batteryPercent);
-  Serial.print("% / USB: ");
-  Serial.println(usb ? "YES" : "NO");
+  if (result == ESP_OK) {
+    Serial.println("[ESP-NOW] Send request OK.");
+  } else {
+    Serial.print("[ESP-NOW] Send failed. Code: ");
+    Serial.println(result);
+  }
+}
 
-  if (strlen(requestedOtaVersion) > 0 && strcmp(requestedOtaVersion, FIRMWARE_VERSION) == 0) {
-    Serial.println("[OTA] Target version equals current version. Skipping OTA.");
-    sendButtonPacket(MSG_OTA_STATUS, "ALREADY_UPDATED", 304);
+void sendHello() {
+  sendPacket(MSG_HELLO, "HELLO");
+}
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+  Serial.print("[ESP-NOW] Send callback: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW LEVEL SUCCESS" : "LOW LEVEL FAIL");
+}
+#else
+void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
+  Serial.print("[ESP-NOW] Send callback: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW LEVEL SUCCESS" : "LOW LEVEL FAIL");
+}
+#endif
+
+void handleReceivedData(const uint8_t *senderMac, const uint8_t *incomingData, int len) {
+  if (len != sizeof(SimplePacket)) {
+    Serial.println("[ESP-NOW] Invalid packet size.");
     return;
   }
 
-  if (batteryPercent < OTA_MIN_BATTERY_PERCENT && !usb) {
-    Serial.println("[OTA] Rejected: battery too low and USB not plugged.");
-    sendButtonPacket(MSG_OTA_STATUS, "LOW_BATTERY", 401);
-    setLedMode(LED_YELLOW_BLINK, 2000);
-    return;
+  SimplePacket packet;
+  memcpy(&packet, incomingData, sizeof(packet));
+
+  Serial.println();
+  Serial.println("========== BUTTON RECEIVED ESP-NOW ==========");
+  Serial.print("From MAC: "); Serial.println(macToString(senderMac));
+  Serial.print("Type: "); Serial.println(packet.type);
+  Serial.print("From: "); Serial.println(packet.from);
+  Serial.print("To: "); Serial.println(packet.to);
+  Serial.print("Text: "); Serial.println(packet.text);
+  Serial.println("=============================================");
+
+  if (packet.type == MSG_ACK && strcmp(packet.to, deviceName.c_str()) == 0) {
+    Serial.println("[ESP-NOW] ACK received from Hub.");
+    hubConnected = true;
+    ledGreen();
+  }
+}
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+void onDataRecv(const esp_now_recv_info_t *recvInfo, const uint8_t *incomingData, int len) {
+  handleReceivedData(recvInfo->src_addr, incomingData, len);
+}
+#else
+void onDataRecv(const uint8_t *macAddr, const uint8_t *incomingData, int len) {
+  handleReceivedData(macAddr, incomingData, len);
+}
+#endif
+
+bool setupEspNow() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  WiFi.setSleep(false);
+
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  Serial.print("[ESP-NOW] Button STA MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  if (!parseMac(hubMacText, hubMac)) {
+    Serial.println("[ESP-NOW] Invalid Hub MAC.");
+    return false;
   }
 
-  if (config.firmwareUrl.length() == 0) {
-    Serial.println("[OTA] Rejected: firmware URL is empty.");
-    sendButtonPacket(MSG_OTA_STATUS, "NO_FW_URL", 400);
-    setLedMode(LED_RED_BLINK, 3000);
-    return;
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESP-NOW] Init failed.");
+    return false;
   }
 
-  sendButtonPacket(MSG_OTA_STATUS, "OTA_STARTING", 100);
-  delay(300);
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataRecv);
 
-  setLedMode(LED_PURPLE_BLINK);
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, hubMac, 6);
+  peerInfo.channel = ESPNOW_CHANNEL;
+  peerInfo.encrypt = false;
 
-  if (!connectToWiFiForOTA()) {
-    Serial.println("[OTA] Failed: Wi-Fi connection.");
-    setLedMode(LED_OTA_FAILED, 3000);
-    delay(3000);
-    ESP.restart();
-    return;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("[ESP-NOW] Failed to add Hub peer.");
+    return false;
   }
 
-  bool ok = performDirectBinOTA(config.firmwareUrl);
+  Serial.println("[ESP-NOW] Ready.");
+  return true;
+}
 
-  if (!ok) {
-    Serial.println("[OTA] Failed.");
-    setLedMode(LED_OTA_FAILED, 3000);
-    delay(3000);
-    ESP.restart();
+void lookForHub10Seconds() {
+  Serial.println();
+  Serial.println("========== LOOKING FOR HUB ==========");
+  Serial.println("[BOOT] Red LED for 10 seconds.");
+
+  ledRed();
+
+  unsigned long start = millis();
+
+  while (millis() - start < 10000 && !hubConnected) {
+    if (millis() - lastHelloMs >= 1000) {
+      lastHelloMs = millis();
+      sendHello();
+    }
+
+    delay(10);
+  }
+
+  if (hubConnected) {
+    Serial.println("[BOOT] Hub connected. LED GREEN.");
+    ledGreen();
+  } else {
+    Serial.println("[BOOT] Hub not connected. LED YELLOW. Starting portal.");
+    ledYellow();
   }
 }
 
 // =====================================================
-// NORMAL LOGIC
+// RFID + BUTTON
 // =====================================================
 
-void updateAckTimeout() {
-  if (!waitingForAck) return;
+void setupRFID() {
+  SPI.begin();
+  mfrc522.PCD_Init();
 
-  if (millis() - lastAckWaitStartMs > ACK_TIMEOUT_MS) {
-    Serial.println("[BTN] ACK timeout.");
-
-    waitingForAck = false;
-
-    if (pendingAckMessageType == MSG_HELLO) {
-      hubConnected = false;
-      setLedMode(LED_YELLOW_BLINK);
-    } else {
-      setLedMode(LED_YELLOW_BLINK, 2000);
-    }
-  }
+  Serial.println("[RFID] MFRC522 initialized.");
 }
 
-void updateConnectionLogic() {
-  unsigned long now = millis();
-
-  if (!hubConnected) {
-    if (currentLedMode != LED_GREEN_FLASH) {
-      setLedMode(LED_YELLOW_BLINK);
-    }
-
-    if (!waitingForAck && now - lastHelloAttemptMs >= HELLO_RETRY_INTERVAL_MS) {
-      lastHelloAttemptMs = now;
-      sendButtonPacket(MSG_HELLO, nullptr, 0);
-    }
-
-    return;
-  }
-
-  if (currentLedMode != LED_GREEN_FLASH &&
-      currentLedMode != LED_YELLOW_BLINK &&
-      currentLedMode != LED_REJECT_RED_BLUE) {
-    setLedMode(LED_GREEN_SOLID);
-  }
-}
-
-void updatePeriodicMessages() {
+void checkRFID() {
   if (!hubConnected) return;
-  if (waitingForAck) return;
 
-  unsigned long now = millis();
+  if (!mfrc522.PICC_IsNewCardPresent()) return;
+  if (!mfrc522.PICC_ReadCardSerial()) return;
 
-  if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
-    lastHeartbeatMs = now;
-    sendButtonPacket(MSG_HEARTBEAT, nullptr, 0);
+  char uid[32];
+  uid[0] = '\0';
+
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    char part[4];
+    snprintf(part, sizeof(part), "%02X", mfrc522.uid.uidByte[i]);
+    strncat(uid, part, sizeof(uid) - strlen(uid) - 1);
   }
 
-  if (now - lastBatteryStatusMs >= BATTERY_STATUS_INTERVAL_MS) {
-    lastBatteryStatusMs = now;
+  Serial.println();
+  Serial.print("[RFID] UID scanned: ");
+  Serial.println(uid);
 
-    uint16_t batteryMv = readBatteryMv();
-    sendButtonPacket(MSG_BATTERY_STATUS, nullptr, batteryMv);
+  blinkBlue();
+  sendPacket(MSG_RFID_SCAN, uid);
+
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+}
+
+void checkButton() {
+  if (!hubConnected) return;
+
+  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastButtonMs > 700) {
+    lastButtonMs = millis();
+
+    Serial.println();
+    Serial.println("[BUTTON] Button pressed.");
+
+    blinkGreen();
+    sendPacket(MSG_BUTTON_PRESS, "BUTTON_PRESS");
   }
 }
 
 // =====================================================
-// SETUP
+// SETUP + LOOP
 // =====================================================
 
 void setup() {
@@ -1271,56 +739,34 @@ void setup() {
 
   analogReadResolution(12);
 
-  setLED(false, false, false);
-  setLedMode(LED_BOOT_BLUE_BLINK);
-
-  bootId = esp_random();
-  if (bootId == 0) bootId = millis();
-
   Serial.println();
-  Serial.println("=================================================");
-  Serial.println("ESS TECHNOLOGIES - SMART BUTTON FIRMWARE");
-  Serial.println("=================================================");
-  Serial.print("Firmware Version: ");
-  Serial.println(FIRMWARE_VERSION);
-  Serial.print("Boot ID: ");
-  Serial.println(bootId);
-  Serial.println("=================================================");
+  Serial.println("=========================================");
+  Serial.println("ESS SMART BUTTON - OTA SAFE IDENTITY");
+  Serial.println("=========================================");
+  Serial.print("BOOTSTRAP_FORCE_OVERWRITE: ");
+  Serial.println(BOOTSTRAP_FORCE_OVERWRITE ? "true" : "false");
+  Serial.print("OTA URL: ");
+  Serial.println(BUTTON_BIN_URL);
+  Serial.println("=========================================");
 
-  loadConfigFromNVS();
-
-  if (shouldEnterSetupPortal()) {
-    startConfigPortal();
-  }
+  loadConfig();
 
   setupRFID();
 
   if (!setupEspNow()) {
-    Serial.println("[BOOT] ESP-NOW setup failed.");
-    setLedMode(LED_RED_BLINK);
+    Serial.println("[BOOT] ESP-NOW failed. Starting portal.");
+    ledYellow();
+    startPortal();
   }
 
-  lastHelloAttemptMs = millis() - HELLO_RETRY_INTERVAL_MS;
-  lastHeartbeatMs = millis();
-  lastBatteryStatusMs = millis();
+  lookForHub10Seconds();
 
-  Serial.println("[BOOT] Normal mode started.");
+  if (!hubConnected) {
+    startPortal();
+  }
 }
 
-// =====================================================
-// LOOP
-// =====================================================
-
 void loop() {
-  updateLed();
-
-  handleOtaRequest();
-
-  updateAckTimeout();
-  updateConnectionLogic();
-
+  checkButton();
   checkRFID();
-  checkButtonPress();
-
-  updatePeriodicMessages();
 }
