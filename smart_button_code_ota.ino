@@ -52,7 +52,7 @@
 // OTA URL
 // =====================================================
 
-#define BUTTON_BIN_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/build/esp32.esp32.esp32/smart_button_code_ota.ino.bin"
+#define BUTTON_BIN_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/build/esp32dev/firmware.bin"
 
 // =====================================================
 // PINS

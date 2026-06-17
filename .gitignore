@@ -1,1 +1,3 @@
 .pio/
+build/esp32dev/
+!build/esp32dev/firmware.bin
