@@ -19,7 +19,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define BTN_FIRMWARE_VERSION "1.2.0"
+#define BTN_FIRMWARE_VERSION "1.3.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -785,17 +785,33 @@ void checkRFID() {
   mfrc522.PCD_StopCrypto1();
 }
 
+// Edge-detected with debounce: a press fires exactly once, no matter how
+// long the pin stays LOW afterwards. A time-based retrigger (old behavior)
+// means a stuck switch, jammed button, or wiring fault floods the system
+// with a "press" every 700ms forever instead of firing once.
+bool buttonRawLast = HIGH;
+bool buttonStable  = HIGH;
+
 void checkButton() {
   if (!hubConnected) return;
 
-  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastButtonMs > 700) {
+  bool raw = digitalRead(BUTTON_PIN);
+
+  if (raw != buttonRawLast) {
     lastButtonMs = millis();
+    buttonRawLast = raw;
+  }
 
-    Serial.println();
-    Serial.println("[BUTTON] Button pressed.");
+  if (millis() - lastButtonMs > 50 && raw != buttonStable) {
+    buttonStable = raw;
 
-    blinkGreen();
-    sendPacket(MSG_BUTTON_PRESS, "BUTTON_PRESS");
+    if (buttonStable == LOW) {
+      Serial.println();
+      Serial.println("[BUTTON] Button pressed.");
+
+      blinkGreen();
+      sendPacket(MSG_BUTTON_PRESS, "BUTTON_PRESS");
+    }
   }
 }
 
