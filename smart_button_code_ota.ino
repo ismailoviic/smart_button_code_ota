@@ -14,6 +14,14 @@
 #include <MFRC522.h>
 
 // =====================================================
+// FIRMWARE VERSION
+// Bump this string after building and pushing new .bin to GitHub.
+// Also update version.txt in the repo root to match.
+// =====================================================
+
+#define BTN_FIRMWARE_VERSION "1.0.0"
+
+// =====================================================
 // BOOTSTRAP CONFIG
 // CHANGE THIS ONLY FOR FIRST MANUAL USB UPLOAD
 // =====================================================
@@ -156,6 +164,22 @@ void blinkPurpleDuringOTA() {
   delay(150);
   setLED(false, false, false);
   delay(150);
+}
+
+// =====================================================
+// BATTERY
+// =====================================================
+
+uint16_t readBatteryMv() {
+  long sum = 0;
+  for (int i = 0; i < 8; i++) sum += analogRead(BATT_PIN);
+  return (uint16_t)((sum / 8) * 3300UL * 2 / 4095);
+}
+
+uint8_t batteryPercent(uint16_t mv) {
+  if (mv >= 4200) return 100;
+  if (mv <= 3000) return 0;
+  return (uint8_t)((mv - 3000UL) * 100 / 1200);
 }
 
 // =====================================================
@@ -423,10 +447,14 @@ String htmlPage() {
 
   html += "<h2>Smart Button OTA Setup</h2>";
 
+  uint16_t battMv  = readBatteryMv();
+  uint8_t  battPct = batteryPercent(battMv);
+
   html += "<div class='info'>";
   html += "<b>Device:</b> " + deviceName;
   html += "<br><b>Hub:</b> " + hubName;
   html += "<br><b>Hub MAC:</b> " + hubMacText;
+  html += "<br><b>Battery:</b> " + String(battMv) + " mV (" + String(battPct) + "%)";
   html += "<br><b>Setup:</b> http://192.168.4.1";
   html += "<br><b>OTA URL:</b><br>";
   html += BUTTON_BIN_URL;
@@ -555,20 +583,16 @@ void sendPacket(uint8_t type, const char *text) {
 }
 
 void sendHello() {
-  sendPacket(MSG_HELLO, "HELLO");
+  char text[32];
+  uint16_t mv = readBatteryMv();
+  snprintf(text, sizeof(text), "HELLO:%u", mv);
+  sendPacket(MSG_HELLO, text);
 }
 
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+static void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
   Serial.print("[ESP-NOW] Send callback: ");
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW LEVEL SUCCESS" : "LOW LEVEL FAIL");
 }
-#else
-void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
-  Serial.print("[ESP-NOW] Send callback: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "LOW LEVEL SUCCESS" : "LOW LEVEL FAIL");
-}
-#endif
 
 void handleReceivedData(const uint8_t *senderMac, const uint8_t *incomingData, int len) {
   if (len != sizeof(SimplePacket)) {
@@ -588,22 +612,32 @@ void handleReceivedData(const uint8_t *senderMac, const uint8_t *incomingData, i
   Serial.print("Text: "); Serial.println(packet.text);
   Serial.println("=============================================");
 
-  if (packet.type == MSG_ACK && strcmp(packet.to, deviceName.c_str()) == 0) {
-    Serial.println("[ESP-NOW] ACK received from Hub.");
-    hubConnected = true;
-    ledGreen();
+  if (strcmp(packet.to, deviceName.c_str()) != 0) return;
+
+  if (packet.type == MSG_ACK) {
+    if (strcmp(packet.text, "OTA_START") == 0) {
+      Serial.println("[ESP-NOW] OTA_START received from Hub. Starting update...");
+      ledPurple();
+      delay(500);
+      esp_now_deinit();
+      if (connectWiFiForOTA()) {
+        performOTA();
+      } else {
+        Serial.println("[OTA] Wi-Fi failed after OTA_START. Restarting.");
+        delay(2000);
+        ESP.restart();
+      }
+    } else {
+      Serial.println("[ESP-NOW] ACK received from Hub.");
+      hubConnected = true;
+      ledGreen();
+    }
   }
 }
 
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onDataRecv(const esp_now_recv_info_t *recvInfo, const uint8_t *incomingData, int len) {
-  handleReceivedData(recvInfo->src_addr, incomingData, len);
-}
-#else
-void onDataRecv(const uint8_t *macAddr, const uint8_t *incomingData, int len) {
+static void onDataRecv(const uint8_t *macAddr, const uint8_t *incomingData, int len) {
   handleReceivedData(macAddr, incomingData, len);
 }
-#endif
 
 bool setupEspNow() {
   WiFi.mode(WIFI_STA);
