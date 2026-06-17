@@ -19,7 +19,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define BTN_FIRMWARE_VERSION "1.0.0"
+#define BTN_FIRMWARE_VERSION "1.2.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -74,7 +74,17 @@
 // =====================================================
 
 #define AP_PASSWORD "12345678"
-#define ESPNOW_CHANNEL 8
+#define ESPNOW_CHANNEL 8  // fixed channel for the button's own local setup AP only
+
+// The Hub's actual ESP-NOW channel follows whatever Wi-Fi router it's
+// connected to (ESP32 has one radio — STA and ESP-NOW share it), so it can
+// change at any time. The button doesn't join any router, so instead of
+// assuming a fixed channel, it hops through all of them looking for the Hub.
+#define CHANNEL_SCAN_MIN        1
+#define CHANNEL_SCAN_MAX        13
+#define CHANNEL_DWELL_MS        300   // time to wait for an ACK on each channel
+#define BOOT_DISCOVERY_TIMEOUT_MS   30000  // full scan budget before falling back to portal
+#define RECONNECT_SCAN_TIMEOUT_MS   8000   // scan budget when a live connection drops
 
 IPAddress apIP(192, 168, 4, 1);
 IPAddress netMsk(255, 255, 255, 0);
@@ -99,10 +109,16 @@ String wifiPassword;
 uint8_t hubMac[6];
 
 bool hubConnected = false;
+uint8_t currentChannel = ESPNOW_CHANNEL;
 
 unsigned long lastHelloMs = 0;
 unsigned long packetCounter = 0;
 unsigned long lastButtonMs = 0;
+unsigned long lastAckMs = 0;
+unsigned long lastPingMs = 0;
+
+#define PING_INTERVAL_MS      8000   // periodic keep-alive HELLO sent to hub
+#define CONNECTION_TIMEOUT_MS 20000  // no ACK within this window -> considered disconnected
 
 // =====================================================
 // SIMPLE ESP-NOW PROTOCOL
@@ -136,6 +152,11 @@ void ledGreen()  { setLED(false, true, false); }
 void ledYellow() { setLED(true, true, false); }
 void ledBlue()   { setLED(false, false, true); }
 void ledPurple() { setLED(true, false, true); }
+void ledCyan()   { setLED(false, true, true); }  // OTA in progress: green + blue
+
+void updateConnectionLED() {
+  if (hubConnected) ledGreen(); else ledRed();
+}
 
 void blinkGreen() {
   Serial.println("[LED] Blink GREEN");
@@ -160,7 +181,7 @@ void blinkBlue() {
 }
 
 void blinkPurpleDuringOTA() {
-  ledPurple();
+  ledCyan();
   delay(150);
   setLED(false, false, false);
   delay(150);
@@ -398,7 +419,7 @@ bool performOTA() {
   http.end();
 
   Serial.println("[OTA] SUCCESS. Restarting.");
-  ledPurple();
+  ledCyan();
   delay(1000);
   ESP.restart();
 
@@ -617,7 +638,7 @@ void handleReceivedData(const uint8_t *senderMac, const uint8_t *incomingData, i
   if (packet.type == MSG_ACK) {
     if (strcmp(packet.text, "OTA_START") == 0) {
       Serial.println("[ESP-NOW] OTA_START received from Hub. Starting update...");
-      ledPurple();
+      ledCyan();
       delay(500);
       esp_now_deinit();
       if (connectWiFiForOTA()) {
@@ -630,7 +651,8 @@ void handleReceivedData(const uint8_t *senderMac, const uint8_t *incomingData, i
     } else {
       Serial.println("[ESP-NOW] ACK received from Hub.");
       hubConnected = true;
-      ledGreen();
+      lastAckMs = millis();
+      updateConnectionLED();
     }
   }
 }
@@ -639,13 +661,19 @@ static void onDataRecv(const uint8_t *macAddr, const uint8_t *incomingData, int 
   handleReceivedData(macAddr, incomingData, len);
 }
 
+void setRadioChannel(uint8_t ch) {
+  if (ch < CHANNEL_SCAN_MIN || ch > CHANNEL_SCAN_MAX) return;
+  currentChannel = ch;
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+}
+
 bool setupEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   WiFi.setSleep(false);
 
   esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  setRadioChannel(currentChannel);
 
   Serial.print("[ESP-NOW] Button STA MAC: ");
   Serial.println(WiFi.macAddress());
@@ -665,7 +693,7 @@ bool setupEspNow() {
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, hubMac, 6);
-  peerInfo.channel = ESPNOW_CHANNEL;
+  peerInfo.channel = 0;  // use whatever channel the radio is currently on
   peerInfo.encrypt = false;
 
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
@@ -677,30 +705,46 @@ bool setupEspNow() {
   return true;
 }
 
-void lookForHub10Seconds() {
+// Dwell on one channel for dwellMs, pinging the Hub, to see if it answers there.
+bool tryChannel(uint8_t ch, unsigned long dwellMs) {
+  setRadioChannel(ch);
+
+  unsigned long start = millis();
+  while (millis() - start < dwellMs) {
+    if (millis() - lastHelloMs >= 120) {
+      lastHelloMs = millis();
+      sendHello();
+    }
+    delay(10);
+    if (hubConnected) return true;
+  }
+  return hubConnected;
+}
+
+// Hops across all Wi-Fi channels looking for the Hub's current ESP-NOW
+// channel (the Hub's channel follows whatever router it's joined, so it's
+// not fixed). Stops as soon as an ACK is received, or after totalTimeoutMs.
+void discoverHub(unsigned long totalTimeoutMs) {
   Serial.println();
-  Serial.println("========== LOOKING FOR HUB ==========");
-  Serial.println("[BOOT] Red LED for 10 seconds.");
+  Serial.println("========== SCANNING CHANNELS FOR HUB ==========");
 
   ledRed();
 
   unsigned long start = millis();
 
-  while (millis() - start < 10000 && !hubConnected) {
-    if (millis() - lastHelloMs >= 1000) {
-      lastHelloMs = millis();
-      sendHello();
+  while (millis() - start < totalTimeoutMs && !hubConnected) {
+    for (uint8_t ch = CHANNEL_SCAN_MIN; ch <= CHANNEL_SCAN_MAX; ch++) {
+      if (tryChannel(ch, CHANNEL_DWELL_MS)) break;
+      if (millis() - start >= totalTimeoutMs) break;
     }
-
-    delay(10);
   }
 
   if (hubConnected) {
-    Serial.println("[BOOT] Hub connected. LED GREEN.");
+    Serial.print("[ESP-NOW] Hub found on channel ");
+    Serial.println(currentChannel);
     ledGreen();
   } else {
-    Serial.println("[BOOT] Hub not connected. LED YELLOW. Starting portal.");
-    ledYellow();
+    Serial.println("[ESP-NOW] Hub not found.");
   }
 }
 
@@ -793,14 +837,32 @@ void setup() {
     startPortal();
   }
 
-  lookForHub10Seconds();
+  discoverHub(BOOT_DISCOVERY_TIMEOUT_MS);
 
   if (!hubConnected) {
+    Serial.println("[BOOT] Hub not found. LED YELLOW. Starting portal.");
+    ledYellow();
     startPortal();
   }
 }
 
+void checkConnectionPing() {
+  if (millis() - lastPingMs >= PING_INTERVAL_MS) {
+    lastPingMs = millis();
+    sendHello();
+  }
+  if (hubConnected && millis() - lastAckMs > CONNECTION_TIMEOUT_MS) {
+    Serial.println("[ESP-NOW] Hub ACK timed out. Marking disconnected.");
+    hubConnected = false;
+    // Hub may have rebooted onto a different Wi-Fi channel — re-scan instead
+    // of retrying forever on a channel the Hub may no longer be using.
+    discoverHub(RECONNECT_SCAN_TIMEOUT_MS);
+  }
+}
+
 void loop() {
+  updateConnectionLED();
+  checkConnectionPing();
   checkButton();
   checkRFID();
 }
